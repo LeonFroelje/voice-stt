@@ -72,12 +72,12 @@
           ...
         }:
         let
-          cfg = config.services.whisper-api;
+          cfg = config.services.voiceStt;
           defaultPkg = self.packages.${pkgs.system}.default;
         in
         {
-          options.services.whisper-api = with lib; {
-            enable = lib.mkEnableOption "Whisper API Server";
+          options.services.voiceStt = with lib; {
+            enable = lib.mkEnableOption "Voice STT  API Server";
 
             package = lib.mkOption {
               type = lib.types.package;

@@ -54,7 +54,7 @@
     {
       packages.${system} = {
         default = python.pkgs.buildPythonApplication {
-          pname = "whisper-api";
+          pname = "whisper-worker";
           version = "0.1.0";
           pyproject = true;
           src = ./.;
@@ -76,75 +76,126 @@
         in
         {
           options.services.voiceStt = with lib; {
-            enable = lib.mkEnableOption "Voice STT  API Server";
+            enable = lib.mkEnableOption "Whisper Transcription Worker";
 
             package = lib.mkOption {
               type = lib.types.package;
               default = defaultPkg;
-              description = "The Whisper API package to use.";
+              description = "The Whisper worker package to use.";
             };
 
             environmentFile = mkOption {
               type = types.nullOr types.path;
               default = null;
-              description = "Path to an environment file for secrets/overrides.";
+              description = ''
+                Path to an environment file for secrets/overrides.
+                To prevent leaks, this file should contain:
+                - WHISPER_S3_SECRET_KEY
+                - WHISPER_MQTT_PASSWORD (if your broker requires auth)
+              '';
             };
 
-            host = mkOption {
+            # --- MQTT Connection ---
+            mqttHost = mkOption {
               type = types.str;
-              default = "127.0.0.1";
-              description = "Hostname or IP to bind the server to.";
+              default = "localhost";
+              description = "Mosquitto broker IP/Hostname";
             };
 
-            port = mkOption {
+            mqttPort = mkOption {
               type = types.int;
-              default = 8000;
-              description = "Port for the FastAPI server.";
+              default = 1883;
+              description = "Mosquitto broker port";
             };
 
+            mqttUser = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Username used to authenticate with MQTT broker";
+            };
+
+            # --- Object Storage (S3 Compatible) ---
+            s3Endpoint = mkOption {
+              type = types.str;
+              default = "http://localhost:3900";
+              description = "URL to S3 storage";
+            };
+
+            s3AccessKey = mkOption {
+              type = types.str;
+              default = "your-access-key";
+              description = "S3 Access Key";
+            };
+
+            s3Bucket = mkOption {
+              type = types.str;
+              default = "voice-commands";
+              description = "S3 Bucket Name";
+            };
+
+            # --- Model Settings ---
             whisperModel = mkOption {
               type = types.str;
-              default = "base";
-              description = "Whisper model size (base, small, large-v3).";
+              default = "small";
+              description = "Whisper model size (tiny, base, small, medium, large-v3).";
             };
 
             device = mkOption {
               type = types.str;
               default = "cuda";
-              description = "Compute device (cuda or cpu).";
+              description = "Compute device (cuda, cpu, or auto).";
             };
 
             modelsDir = mkOption {
               type = types.str;
-              default = "/var/lib/whisper-api-models";
-              description = "Directory to store downloaded models.";
+              default = "/var/lib/whisper-models";
+              description = "Directory to store downloaded Hugging Face and CTranslate2 models.";
+            };
+
+            # --- System ---
+            logLevel = mkOption {
+              type = types.str;
+              default = "INFO";
+              description = "Logging Level (DEBUG, INFO, WARNING, ERROR)";
             };
           };
 
           config = lib.mkIf cfg.enable {
-            systemd.services.whisper-api = {
-              description = "Faster-Whisper FastAPI Service";
+            systemd.services.voice-stt = {
+              description = "Faster-Whisper Transcription Worker";
               wantedBy = [ "multi-user.target" ];
               after = [ "network.target" ];
 
-              environment = {
-                WHISPER_HOST = cfg.host;
-                WHISPER_PORT = toString cfg.port;
-                WHISPER_WHISPER_MODEL = cfg.whisperModel;
-                WHISPER_DEVICE = cfg.device;
-                WHISPER_MODELS_DIR = cfg.modelsDir;
+              environment =
+                let
+                  env = {
+                    WHISPER_MQTT_HOST = cfg.mqttHost;
+                    WHISPER_MQTT_PORT = toString cfg.mqttPort;
+                    WHISPER_MQTT_USER = cfg.mqttUser;
 
-                # CRITICAL FOR CUDA: Points CTranslate2 to the NixOS NVIDIA drivers
-                LD_LIBRARY_PATH = "/run/opengl-driver/lib";
-                PYTHONUNBUFFERED = "1";
-              };
+                    WHISPER_S3_ENDPOINT = cfg.s3Endpoint;
+                    WHISPER_S3_ACCESS_KEY = cfg.s3AccessKey;
+                    WHISPER_S3_BUCKET = cfg.s3Bucket;
+
+                    WHISPER_WHISPER_MODEL = cfg.whisperModel;
+                    WHISPER_DEVICE = cfg.device;
+                    WHISPER_MODELS_DIR = cfg.modelsDir;
+                    WHISPER_LOG_LEVEL = cfg.logLevel;
+
+                    # CRITICAL FOR CUDA: Points CTranslate2 to the NixOS NVIDIA drivers
+                    LD_LIBRARY_PATH = "/run/opengl-driver/lib";
+                    PYTHONUNBUFFERED = "1";
+                  };
+                in
+                lib.filterAttrs (n: v: v != null) env;
 
               serviceConfig = {
-                ExecStart = "${cfg.package}/bin/whisper-api";
+                # Update this if your binary name is still `whisper-api`
+                ExecStart = "${cfg.package}/bin/voice-stt";
                 EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
 
                 # State Management
-                StateDirectory = "whisper-api-models";
+                StateDirectory = cfg.modelsDir;
 
                 # Hardening & GPU Permissions
                 DynamicUser = true;

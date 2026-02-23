@@ -38,6 +38,8 @@ def download_audio_file(audio_url: str) -> str:
         endpoint_url=settings.s3_endpoint,
         aws_access_key_id=settings.s3_access_key,
         aws_secret_access_key=settings.s3_secret_key.get_secret_value(),
+        region_name="garage",
+        config=boto3.session.Config(signature_version="s3v4"),
     )
 
     # We use delete=False so boto3 can write to it, and we delete it manually later
@@ -104,6 +106,7 @@ async def main_async():
                 audio_url = payload.get("audio_url")
                 room = payload.get("room")
 
+                logger.debug(payload)
                 if not audio_url or not room:
                     logger.warning(
                         "Received invalid payload missing 'audio_url' or 'room'."
@@ -130,6 +133,7 @@ async def main_async():
                         await client.publish(
                             "voice/asr/text", payload=json.dumps(result_payload)
                         )
+                        logger.debug("Published transcript to voice/asr/text")
                     else:
                         logger.info("Transcription resulted in empty text. Ignoring.")
 

@@ -148,7 +148,7 @@
 
             modelsDir = mkOption {
               type = types.str;
-              default = "/var/lib/whisper-models";
+              default = "/var/lib/voice-stt";
               description = "Directory to store downloaded Hugging Face and CTranslate2 models.";
             };
 
@@ -195,7 +195,7 @@
                 EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
 
                 # State Management
-                StateDirectory = cfg.modelsDir;
+                StateDirectory = "voice-stt";
 
                 # Hardening & GPU Permissions
                 DynamicUser = true;

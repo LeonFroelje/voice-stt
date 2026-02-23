@@ -42,14 +42,13 @@
       };
       python = pkgs.python313;
       apiDependencies = with python.pkgs; [
-        fastapi
-        uvicorn
-        python-multipart
         faster-whisper
         pydantic
         setuptools
         pydantic-settings
         python-dotenv
+        aiomqtt
+        boto3
       ];
     in
     {

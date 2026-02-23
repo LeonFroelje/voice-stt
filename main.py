@@ -1,143 +1,160 @@
 import os
 import gc
+import json
 import tempfile
-import uvicorn
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+import asyncio
+import logging
+import boto3
+import aiomqtt
 from faster_whisper import WhisperModel
 
-# ==========================================
-# 1. IMPORT YOUR CONFIGURATION
-# ==========================================
-# Assuming you saved the previous snippet as 'config.py'
 from config import settings
 
-# ==========================================
-# 2. DIRECTORY & CACHE SETUP
-# ==========================================
+# --- Logging Setup ---
+logging.basicConfig(
+    level=settings.log_level,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("TranscriptionWorker")
+
+# --- Directory & Cache Setup ---
 os.makedirs(settings.models_dir, exist_ok=True)
 os.environ["HF_HOME"] = os.path.join(settings.models_dir, "huggingface")
-
-whisper_model = None
 
 # Automatically drop to int8 quantization if running on CPU to save RAM
 COMPUTE_TYPE = "float16" if settings.device == "cuda" else "int8"
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global whisper_model
-    print(f"Data directory configured at: {settings.models_dir}")
-    print(
+def download_audio_file(audio_url: str) -> str:
+    """Downloads audio securely from S3 object storage into a temp file."""
+    # Extract the object key (filename) from the URL
+    # E.g., http://endpoint/bucket/my-audio.wav -> my-audio.wav
+    object_key = audio_url.split("/")[-1]
+
+    logger.debug(f"Downloading {object_key} from S3 bucket '{settings.s3_bucket}'...")
+
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=settings.s3_endpoint,
+        aws_access_key_id=settings.s3_access_key,
+        aws_secret_access_key=settings.s3_secret_key.get_secret_value(),
+    )
+
+    # We use delete=False so boto3 can write to it, and we delete it manually later
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+        s3_client.download_file(settings.s3_bucket, object_key, temp_audio.name)
+        return temp_audio.name
+
+
+def run_transcription(model: WhisperModel, file_path: str) -> str:
+    """Runs the blocking faster-whisper model."""
+    logger.debug("Starting transcription...")
+
+    vad_kwargs = {
+        "vad_filter": True,
+        "vad_parameters": dict(
+            min_silence_duration_ms=500, speech_pad_ms=400, threshold=0.5
+        ),
+    }
+
+    segments_generator, info = model.transcribe(
+        file_path,
+        beam_size=5,
+        **vad_kwargs,
+    )
+
+    segments = list(segments_generator)
+    full_text = " ".join([seg.text.strip() for seg in segments])
+
+    logger.info(
+        f"Transcription complete (Language: {info.language}): '{full_text.strip()}'"
+    )
+    return full_text.strip()
+
+
+async def main_async():
+    logger.info(f"Data directory configured at: {settings.models_dir}")
+    logger.info(
         f"Loading faster-whisper '{settings.whisper_model}' model on {settings.device}..."
     )
 
+    # Initialize the model once
     whisper_model = WhisperModel(
         settings.whisper_model,
         device=settings.device,
         compute_type=COMPUTE_TYPE,
         download_root=os.path.join(settings.models_dir, "faster-whisper"),
     )
-    yield
-    del whisper_model
-    gc.collect()
-
-
-app = FastAPI(title="Faster-Whisper OpenAI-Compatible API", lifespan=lifespan)
-
-
-@app.post("/v1/audio/transcriptions")
-async def create_transcription(
-    file: UploadFile = File(...),
-    model: str = Form("whisper-1"),
-    language: str = Form(None),
-    response_format: str = Form("json"),
-    temperature: float = Form(0.0),
-    vad_filter: bool = Form(True),
-):
-    global whisper_model
-
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file uploaded")
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
-        temp_audio.write(await file.read())
-        temp_audio_path = temp_audio.name
+    logger.info("Model loaded successfully.")
 
     try:
-        vad_kwargs = {}
-        if vad_filter:
-            vad_kwargs = {
-                "vad_filter": True,
-                "vad_parameters": dict(
-                    min_silence_duration_ms=500, speech_pad_ms=400, threshold=0.5
-                ),
-            }
-
-        segments_generator, info = whisper_model.transcribe(
-            temp_audio_path,
-            language=language,
-            temperature=temperature,
-            beam_size=5,
-            **vad_kwargs,
-        )
-
-        segments = list(segments_generator)
-        full_text = " ".join([seg.text.strip() for seg in segments])
-
-        if response_format == "verbose_json":
-            openai_segments = []
-            for seg in segments:
-                openai_segments.append(
-                    {
-                        "id": seg.id,
-                        "seek": seg.seek,
-                        "start": seg.start,
-                        "end": seg.end,
-                        "text": seg.text.strip(),
-                        "tokens": seg.tokens,
-                        "temperature": seg.temperature,
-                        "avg_logprob": seg.avg_logprob,
-                        "compression_ratio": seg.compression_ratio,
-                        "no_speech_prob": seg.no_speech_prob,
-                    }
-                )
-
-            return JSONResponse(
-                {
-                    "task": "transcribe",
-                    "language": info.language,
-                    "duration": info.duration,
-                    "text": full_text.strip(),
-                    "segments": openai_segments,
-                }
+        async with aiomqtt.Client(
+            settings.mqtt_host, port=settings.mqtt_port
+        ) as client:
+            logger.info(
+                f"Connected to MQTT Broker at {settings.mqtt_host}:{settings.mqtt_port}"
             )
 
-        else:
-            return JSONResponse({"text": full_text.strip()})
+            # Subscribe to the topic published by the Satellite
+            await client.subscribe("voice/audio/recorded")
+            logger.info("Listening for audio tasks on 'voice/audio/recorded'...")
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            async for message in client.messages:
+                payload = json.loads(message.payload.decode())
+                audio_url = payload.get("audio_url")
+                room = payload.get("room")
+
+                if not audio_url or not room:
+                    logger.warning(
+                        "Received invalid payload missing 'audio_url' or 'room'."
+                    )
+                    continue
+
+                logger.info(f"Task received for room: {room}")
+                temp_audio_path = None
+
+                try:
+                    # 1. Download the audio from S3
+                    temp_audio_path = await asyncio.to_thread(
+                        download_audio_file, audio_url
+                    )
+
+                    # 2. Transcribe the audio
+                    transcription = await asyncio.to_thread(
+                        run_transcription, whisper_model, temp_audio_path
+                    )
+
+                    # 3. Publish the transcription result
+                    if transcription:
+                        result_payload = {"room": room, "text": transcription}
+                        await client.publish(
+                            "voice/asr/text", payload=json.dumps(result_payload)
+                        )
+                    else:
+                        logger.info("Transcription resulted in empty text. Ignoring.")
+
+                except Exception as e:
+                    logger.error(f"Error processing transcription task: {e}")
+
+                finally:
+                    # 4. Cleanup the temporary file
+                    if temp_audio_path and os.path.exists(temp_audio_path):
+                        os.remove(temp_audio_path)
+
+    except aiomqtt.MqttError as error:
+        logger.error(f"MQTT Error: {error}")
+    except KeyboardInterrupt:
+        logger.info("Shutting down worker...")
     finally:
-        if os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
+        del whisper_model
+        gc.collect()
 
 
-# ==========================================
-# 3. PROGRAMMATIC EXECUTION
-# ==========================================
-# Replace the old if __name__ == "__main__": block with this:
 def main():
-    print(f"Starting Whisper API on {settings.host}:{settings.port}...")
-    uvicorn.run(
-        "main:app",
-        host=settings.host,
-        port=settings.port,
-        log_level=settings.log_level.lower(),
-    )
+    """Synchronous wrapper for the setuptools entry point."""
+    import asyncio
 
-
-if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        pass

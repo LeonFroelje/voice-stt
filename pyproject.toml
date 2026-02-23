@@ -8,9 +8,8 @@ version = "0.1.0"
 description = "FastAPI Faster-Whisper Server"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi",
-    "uvicorn",
-    "python-multipart",
+    "aiomqtt",
+    "boto3",
     "faster-whisper",
     "pydantic",
     "pydantic-settings",

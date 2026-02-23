@@ -1,20 +1,38 @@
 import argparse
 import os
-from pydantic import Field
+from typing import Optional
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class WhisperSettings(BaseSettings):
-    # --- Server Settings ---
-    host: str = Field(
-        default="127.0.0.1",
-        description="Hostname or IP for the FastAPI server to bind to",
-    )
-    port: int = Field(
-        default=8000,
-        description="Port for the FastAPI server",
-    )
+    # --- MQTT Connection ---
 
+    mqtt_host: str = Field(
+        default="localhost",
+        description="Mosquitto broker IP/Hostname",
+    )
+    mqtt_port: int = Field(
+        default=1883,
+        description="Mosquitto broker port",
+    )
+    mqtt_user: Optional[str] = Field(
+        default=None, description="Username used to authenticate with mqtt broker"
+    )
+    mqtt_password: Optional[str] = Field(
+        default=None, description="Password used to authenticate with mqtt broker"
+    )
+    # --- Object Storage (S3 Compatible) ---
+    s3_endpoint: str = Field(
+        default="http://localhost:3900", description="URL to your S3-compatible storage"
+    )
+    s3_access_key: str = Field(default="your-access-key", description="S3 Access Key")
+    s3_secret_key: SecretStr = Field(
+        default="your-secret-key", description="S3 Secret Key"
+    )
+    s3_bucket: str = Field(
+        default="voice-commands", description="The bucket where audio files are stored"
+    )
     # --- Model Settings ---
     whisper_model: str = Field(
         default="small",
@@ -37,33 +55,29 @@ class WhisperSettings(BaseSettings):
 
 
 def get_settings() -> WhisperSettings:
-    """
-    Parses CLI arguments first, then initializes Settings.
-    Precedence: CLI Args > Environment Vars > .env file > Defaults
-    """
-    parser = argparse.ArgumentParser(description="Whisper API Server Configuration")
+    parser = argparse.ArgumentParser(description="Whisper Transcription Worker")
 
-    # Add arguments for every field you want controllable via CLI
-    parser.add_argument("--host", help="Hostname or IP for the server (e.g., 0.0.0.0)")
-    parser.add_argument("--port", type=int, help="Port for the FastAPI server")
+    parser.add_argument("--mqtt-host", help="Mosquitto broker IP/Hostname")
+    parser.add_argument("--mqtt-port", type=int, help="Mosquitto broker port")
+    parser.add_argument("--mqtt-user")
+    parser.add_argument("--mqtt-password")
+
+    parser.add_argument("--s3-endpoint", help="URL to S3 storage")
+    parser.add_argument("--s3-access-key", help="S3 Access Key")
+    parser.add_argument("--s3-secret-key", help="S3 Secret Key")
+    parser.add_argument("--s3-bucket", help="S3 Bucket Name")
 
     parser.add_argument("--whisper-model", help="Whisper model size to load")
     parser.add_argument("--device", help="Compute device ('cuda' or 'cpu')")
     parser.add_argument("--models-dir", help="Directory cache for downloaded models")
-
     parser.add_argument(
         "--log-level", help="Logging Level (DEBUG, INFO, WARNING, ERROR)"
     )
 
     args, unknown = parser.parse_known_args()
 
-    # Create a dictionary of only the arguments that were actually provided via CLI
-    # We replace hyphens with underscores to match the Pydantic field names
     cli_args = {k.replace("-", "_"): v for k, v in vars(args).items() if v is not None}
-
-    # Initialize Settings
     return WhisperSettings(**cli_args)
 
 
-# Create a global instance
 settings = get_settings()

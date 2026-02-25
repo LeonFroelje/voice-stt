@@ -25,13 +25,12 @@ os.environ["HF_HOME"] = os.path.join(settings.models_dir, "huggingface")
 COMPUTE_TYPE = "float16" if settings.device == "cuda" else "int8"
 
 
-def download_audio_file(audio_url: str) -> str:
+def download_audio_file(filename: str) -> str:
     """Downloads audio securely from S3 object storage into a temp file."""
     # Extract the object key (filename) from the URL
     # E.g., http://endpoint/bucket/my-audio.wav -> my-audio.wav
-    object_key = audio_url.split("/")[-1]
 
-    logger.debug(f"Downloading {object_key} from S3 bucket '{settings.s3_bucket}'...")
+    logger.debug(f"Downloading {filename} from S3 bucket '{settings.s3_bucket}'...")
 
     s3_client = boto3.client(
         "s3",
@@ -44,7 +43,7 @@ def download_audio_file(audio_url: str) -> str:
 
     # We use delete=False so boto3 can write to it, and we delete it manually later
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
-        s3_client.download_file(settings.s3_bucket, object_key, temp_audio.name)
+        s3_client.download_file(settings.s3_bucket, filename, temp_audio.name)
         return temp_audio.name
 
 
@@ -103,13 +102,13 @@ async def main_async():
 
             async for message in client.messages:
                 payload = json.loads(message.payload.decode())
-                audio_url = payload.get("audio_url")
+                filename = payload.get("filename")
                 room = payload.get("room")
 
                 logger.debug(payload)
-                if not audio_url or not room:
+                if not filename or not room:
                     logger.warning(
-                        "Received invalid payload missing 'audio_url' or 'room'."
+                        "Received invalid payload missing 'filename' or 'room'."
                     )
                     continue
 
@@ -119,7 +118,7 @@ async def main_async():
                 try:
                     # 1. Download the audio from S3
                     temp_audio_path = await asyncio.to_thread(
-                        download_audio_file, audio_url
+                        download_audio_file, filename
                     )
 
                     # 2. Transcribe the audio
